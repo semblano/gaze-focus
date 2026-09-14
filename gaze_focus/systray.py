@@ -11,6 +11,8 @@ import os
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)  # cv2 poisons this on import
 from PyQt5 import QtCore, QtGui, QtWidgets
 
+from .sysbindings import find_conflicts
+
 # (r, g, b) per status
 STATUS_COLORS = {
     "enabled": (70, 200, 90),    # green
@@ -38,6 +40,123 @@ def _icon_pixmap(status):
     p.drawEllipse(8, 8, 6, 6)
     p.end()
     return QtGui.QIcon(pm)
+
+
+# Qt key -> pynput <name> for keys that aren't a plain printable character
+_NAMED_KEYS = {
+    QtCore.Qt.Key_Space: "space",
+    QtCore.Qt.Key_Tab: "tab",
+    QtCore.Qt.Key_Backspace: "backspace",
+    QtCore.Qt.Key_Return: "enter",
+    QtCore.Qt.Key_Enter: "enter",
+    QtCore.Qt.Key_Escape: "esc",
+    QtCore.Qt.Key_Delete: "delete",
+    QtCore.Qt.Key_Home: "home",
+    QtCore.Qt.Key_End: "end",
+    QtCore.Qt.Key_PageUp: "page_up",
+    QtCore.Qt.Key_PageDown: "page_down",
+    QtCore.Qt.Key_Left: "left",
+    QtCore.Qt.Key_Right: "right",
+    QtCore.Qt.Key_Up: "up",
+    QtCore.Qt.Key_Down: "down",
+    QtCore.Qt.Key_Insert: "insert",
+    QtCore.Qt.Key_CapsLock: "caps_lock",
+    QtCore.Qt.Key_NumLock: "num_lock",
+    QtCore.Qt.Key_ScrollLock: "scroll_lock",
+    QtCore.Qt.Key_Print: "print_screen",
+    QtCore.Qt.Key_Pause: "pause",
+    QtCore.Qt.Key_Menu: "menu",
+}
+# keys that are themselves modifiers: wait for a following "real" key instead
+# of firing the hotkey on the modifier alone
+_MODIFIER_KEYS = {
+    QtCore.Qt.Key_Control, QtCore.Qt.Key_Alt, QtCore.Qt.Key_AltGr,
+    QtCore.Qt.Key_Shift, QtCore.Qt.Key_Meta,
+}
+
+
+def _qt_main_key_name(key):
+    """pynput <name> (or single lowercase char) for a Qt key code the user
+    pressed, or None if unsupported."""
+    if key in _NAMED_KEYS:
+        return f"<{_NAMED_KEYS[key]}>"
+    if QtCore.Qt.Key_F1 <= key <= QtCore.Qt.Key_F35:
+        return f"<f{key - QtCore.Qt.Key_F1 + 1}>"
+    if 0x20 <= key <= 0x7e:  # Qt maps A-Z/0-9/most punctuation to ASCII
+        return chr(key).lower()
+    return None
+
+
+def _qt_modifier_names(qmods):
+    mods = []
+    if qmods & QtCore.Qt.ControlModifier:
+        mods.append("<ctrl>")
+    if qmods & QtCore.Qt.AltModifier:
+        mods.append("<alt>")
+    if qmods & QtCore.Qt.ShiftModifier:
+        mods.append("<shift>")
+    if qmods & QtCore.Qt.MetaModifier:
+        mods.append("<cmd>")
+    return mods
+
+
+class _HotkeyCaptureDialog(QtWidgets.QDialog):
+    """Records the next real key combination the user presses and turns it
+    into pynput hotkey syntax — no need to know that syntax by hand. Warns
+    (but doesn't block) if the combo already matches a desktop keybinding."""
+
+    def __init__(self, current, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("gaze-focus — change hotkey")
+        self.setModal(True)
+        self.combo = None
+        self._label = QtWidgets.QLabel(
+            f"Current hotkey: {current or '(none)'}\n\n"
+            "Press the new key combination now…\n(Esc cancels)")
+        buttons = QtWidgets.QDialogButtonBox()
+        disable_btn = buttons.addButton("Disable Hotkey", QtWidgets.QDialogButtonBox.DestructiveRole)
+        cancel_btn = buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        disable_btn.clicked.connect(self._disable)
+        cancel_btn.clicked.connect(self.reject)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(self._label)
+        layout.addWidget(buttons)
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    def _disable(self):
+        self.combo = "none"
+        self.accept()
+
+    def keyPressEvent(self, event):
+        if event.isAutoRepeat():
+            return
+        key = event.key()
+        if key == QtCore.Qt.Key_Escape and event.modifiers() == QtCore.Qt.NoModifier:
+            self.reject()
+            return
+        if key in _MODIFIER_KEYS:
+            mods = "+".join(m.strip("<>") for m in _qt_modifier_names(event.modifiers()))
+            self._label.setText(f"…{mods}" if mods else "…")
+            return
+        main = _qt_main_key_name(key)
+        if main is None:
+            self._label.setText("That key isn't supported — try another combination…")
+            return
+        combo = "+".join(_qt_modifier_names(event.modifiers()) + [main])
+        conflicts = find_conflicts(combo)
+        if conflicts:
+            reply = QtWidgets.QMessageBox.question(
+                self, "gaze-focus — possible conflict",
+                f"{combo} already looks bound to:\n\n"
+                + "\n".join(f" • {c}" for c in conflicts)
+                + "\n\nUse it anyway?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No)
+            if reply != QtWidgets.QMessageBox.Yes:
+                self._label.setText("Press the new key combination now…\n(Esc cancels)")
+                return
+        self.combo = combo
+        self.accept()
 
 
 class GazeTray:
@@ -86,16 +205,11 @@ class GazeTray:
     def _on_change_hotkey(self):
         if self._on_hotkey_change is None:
             return
-        current = self._hotkey or ""
-        text, ok = QtWidgets.QInputDialog.getText(
-            None, "gaze-focus — change hotkey",
-            "Enable/disable hotkey (pynput syntax, e.g. <ctrl>+<alt>+g;\n"
-            "'none' disables the hotkey entirely):",
-            QtWidgets.QLineEdit.Normal, current)
-        if not ok:
+        dlg = _HotkeyCaptureDialog(self._hotkey)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted or not dlg.combo:
             return
-        text = text.strip()
-        if not text or text == current:
+        text = dlg.combo
+        if text == (self._hotkey or ""):
             return
         try:
             self._on_hotkey_change(text)
@@ -104,7 +218,8 @@ class GazeTray:
                 None, "gaze-focus", f"Could not set hotkey {text!r}:\n{exc}")
             return
         self._hotkey = text
-        self.tray.showMessage("gaze-focus", f"Hotkey set to {text}",
+        label = "disabled" if text == "none" else text
+        self.tray.showMessage("gaze-focus", f"Hotkey {label}",
                               QtWidgets.QSystemTrayIcon.Information, 3000)
 
     def _on_quit(self):
