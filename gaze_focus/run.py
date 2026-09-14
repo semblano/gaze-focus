@@ -46,6 +46,12 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
     mons = get_monitors()
     seam_stick = 0.5 * err  # must land this far inside another monitor to switch
     cur_mon = None
+    # union of all monitors — clamps the gaze on-screen so monitor detection
+    # works even when the ridge fit extrapolates off-screen
+    screen_x0 = min(m.x for m in mons)
+    screen_x1 = max(m.x + m.width for m in mons)
+    screen_y0 = min(m.y for m in mons)
+    screen_y1 = max(m.y + m.height for m in mons)
 
     clickers = []
     if clicks and click_gesture != "none":
@@ -111,6 +117,11 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
                 point = model.predict(feats_list)
                 if point is not None:
                     smoothed = gaze_filter.update(point, now)
+                    # keep the gaze on-screen: the ridge fit can extrapolate
+                    # off-screen when a low-variance feature drifts
+                    smoothed = np.array([
+                        min(max(smoothed[0], screen_x0), screen_x1),
+                        min(max(smoothed[1], screen_y0), screen_y1)])
             if blob is not None and smoothed is not None:
                 blob.set_target(*smoothed)
             if smoothed is None:

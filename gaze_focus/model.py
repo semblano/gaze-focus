@@ -22,10 +22,16 @@ def saved_error_px(default=250.0):
 
 
 class GazeModel:
-    def __init__(self, mean, std, weights):
+    def __init__(self, mean, std, weights, nmin=None, nmax=None):
         self.mean = np.asarray(mean, dtype=np.float64)
         self.std = np.asarray(std, dtype=np.float64)
         self.weights = np.asarray(weights, dtype=np.float64)  # (d+1, 2)
+        # Normalized feature bounds from the calibration data. Clipping live
+        # features to these stops the ridge fit extrapolating off-screen when
+        # a low-variance feature (e.g. iris-in-eye position) drifts slightly
+        # outside its calibration range.
+        self.nmin = np.asarray(nmin, dtype=np.float64) if nmin is not None else None
+        self.nmax = np.asarray(nmax, dtype=np.float64) if nmax is not None else None
 
     @classmethod
     def fit(cls, X, Y, ridge=None, penalty=None):
@@ -51,7 +57,7 @@ class GazeModel:
         if ridge is None:
             ridge = cls._cv_ridge(Xb, Y, pen)
         w = np.linalg.solve(Xb.T @ Xb + ridge * np.diag(pen), Xb.T @ Y)
-        model = cls(mean, std, w)
+        model = cls(mean, std, w, nmin=Xn.min(axis=0), nmax=Xn.max(axis=0))
         model.ridge = ridge
         rmse = float(np.sqrt(((model.predict_batch(X) - Y) ** 2).sum(axis=1).mean()))
         return model, rmse
@@ -76,6 +82,8 @@ class GazeModel:
 
     def predict_batch(self, X):
         Xn = (np.asarray(X, dtype=np.float64) - self.mean) / self.std
+        if self.nmin is not None:
+            Xn = np.clip(Xn, self.nmin, self.nmax)
         Xb = np.hstack([Xn, np.ones((len(Xn), 1))])
         return Xb @ self.weights
 
@@ -84,11 +92,14 @@ class GazeModel:
 
     def to_dict(self):
         return {"mean": self.mean.tolist(), "std": self.std.tolist(),
-                "weights": self.weights.tolist()}
+                "weights": self.weights.tolist(),
+                "nmin": self.nmin.tolist() if self.nmin is not None else None,
+                "nmax": self.nmax.tolist() if self.nmax is not None else None}
 
     @classmethod
     def from_dict(cls, data):
-        return cls(data["mean"], data["std"], data["weights"])
+        return cls(data["mean"], data["std"], data["weights"],
+                   data.get("nmin"), data.get("nmax"))
 
 
 # Per-feature ridge multipliers for one camera block; layout matches
