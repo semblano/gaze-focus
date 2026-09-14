@@ -2,3 +2,4 @@ mediapipe>=0.10.14
 numpy
 python-xlib
 PyQt5
+pynput

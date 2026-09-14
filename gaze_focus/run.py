@@ -1,9 +1,11 @@
 """Main loop: predict gaze point, hit-test windows, trigger, switch focus."""
+import threading
 import time
 
 import numpy as np
 
 from .blink import BlinkDetector
+from .controller import Controller
 from .features import MultiCamera
 from .filter import FixationFilter
 from .gestures import GestureDetector
@@ -24,7 +26,8 @@ GESTURE_OPTIONS = {
 
 def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
         smooth=0.25, clicks=True, click_gesture="smirk", click_key="F8",
-        dry_run=False, verbose=False, overlay=False):
+        dry_run=False, verbose=False, overlay=False,
+        systray=True, hotkey="<ctrl>+<alt>+g"):
     if cooldown is None:
         cooldown = 0.5 if trigger == "blink" else 1.2
     if not CALIB_PATH.exists():
@@ -73,6 +76,55 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
     windows_at = 0.0
     last_report = 0.0
 
+    # --- systray + hotkey: enable/disable the service at runtime ---
+    controller = Controller(enabled=True)
+    running = threading.Event()
+    running.set()
+
+    def _toggle():
+        controller.toggle()
+        print(f"[gaze-focus] service {'enabled' if controller.enabled else 'disabled'}")
+
+    hotkey_listener = None
+
+    def _set_hotkey(new_hotkey):
+        """(Re)register the global hotkey. Raises ValueError for an invalid
+        spec, in which case the previous listener is left untouched."""
+        nonlocal hotkey_listener, hotkey
+        if new_hotkey and new_hotkey != "none":
+            from pynput.keyboard import HotKey
+            HotKey.parse(new_hotkey)  # validate before touching the old listener
+        if hotkey_listener is not None:
+            hotkey_listener.stop()
+            hotkey_listener = None
+        if new_hotkey and new_hotkey != "none":
+            from .hotkey import start_hotkey
+            hotkey_listener = start_hotkey(new_hotkey, _toggle)
+        hotkey = new_hotkey
+
+    def _on_hotkey_change(new_hotkey):
+        _set_hotkey(new_hotkey)
+        from .config import save_config
+        save_config({"hotkey": new_hotkey})
+        print(f"[gaze-focus] hotkey changed to {new_hotkey!r} (saved)")
+
+    _set_hotkey(hotkey)
+
+    tray = None
+    if systray:
+        import os
+        os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)  # cv2 poisons this on import
+        from PyQt5 import QtWidgets
+        # a QApplication must exist before any QSystemTrayIcon call, or the
+        # platform integration (loaded lazily) can crash
+        _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        if QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
+            from .systray import GazeTray
+            tray = GazeTray(controller, on_quit=running.clear, on_toggle=_toggle,
+                            hotkey=hotkey, on_hotkey_change=_on_hotkey_change)
+        else:
+            print("warning: system tray unavailable; systray icon disabled")
+
     how = ("double-blink at a window to focus it" if trigger == "blink"
            else f"auto-focus after {dwell}s gaze dwell + {idle}s keyboard idle")
     extras = []
@@ -81,14 +133,21 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
                       + (", mouth-open = right click" if len(clickers) > 1 else ""))
     if click_code is not None:
         extras.append(f"{click_key} = left click at gaze")
+    if hotkey_listener is not None:
+        extras.append(f"{hotkey} = enable/disable")
+    if tray is not None:
+        extras.append("systray icon = status")
     extras = ("; " + "; ".join(extras)) if extras else ""
     print(f"gaze-focus running ({'dry-run; ' if dry_run else ''}{how}{extras}); Ctrl-C to stop.")
     ext.start()  # cameras process in the background; this loop runs at UI rate
     last_stamp = 0.0
     try:
-        while True:
+        while running.is_set():
             if blob is not None:
                 blob.tick()  # glide the overlay every UI frame (~60Hz)
+            if tray is not None:
+                tray.process_events()
+                tray.refresh()
             time.sleep(0.015)
             feats_list, blink_score, gestures, stamp = ext.latest()
             now = time.time()
@@ -100,6 +159,10 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
             if stamp == last_stamp:  # no new camera data yet
                 continue
             last_stamp = stamp
+            controller.mark_frames()  # camera is delivering frames
+            if not controller.enabled:  # service paused: no gaze actions
+                candidate_id = None
+                continue
             if all(f is None for f in feats_list):
                 candidate_id = None
                 continue
@@ -180,6 +243,11 @@ def run(cameras=(0,), trigger="dwell", dwell=0.4, idle=0.6, cooldown=None,
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        running.clear()
+        if hotkey_listener is not None:
+            hotkey_listener.stop()
+        if tray is not None:
+            tray.close()
         if blob is not None:
             blob.close()
         ext.close()

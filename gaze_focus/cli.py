@@ -6,6 +6,10 @@ def _camera_list(s):
 
 
 def main():
+    from .config import CONFIG_PATH, load_config
+
+    cfg = load_config()
+
     ap = argparse.ArgumentParser(
         prog="gaze-focus",
         description="Look at a window, double-blink, type there: webcam gaze -> X11 focus.")
@@ -44,6 +48,15 @@ def main():
     r.add_argument("--verbose", action="store_true", help="print gaze point twice a second")
     r.add_argument("--overlay", action="store_true",
                    help="show a translucent click-through blob at the predicted gaze point")
+    r.add_argument("--no-systray", action="store_true",
+                   help="disable the systray status icon")
+    r.add_argument("--no-hotkey", action="store_true",
+                   help="disable the enable/disable hotkey")
+    r.add_argument("--hotkey", default=cfg["hotkey"],
+                   help="hotkey to enable/disable the service "
+                        f"(pynput syntax, e.g. <ctrl>+<alt>+g; 'none' disables; "
+                        f"default from config: {cfg['hotkey']!r}; change the "
+                        "persisted default with `gaze-focus config --hotkey ...`)")
 
     p = sub.add_parser("preview", help="live webcam overlay: landmarks + predicted gaze on a monitor map")
     add_cameras(p)
@@ -54,6 +67,11 @@ def main():
 
     t = sub.add_parser("camera-test", help="check cameras + face detection without any UI")
     add_cameras(t)
+
+    g = sub.add_parser("config", help="view or persist settings (currently: the enable/disable hotkey)")
+    g.add_argument("--hotkey", metavar="KEYS",
+                   help="persist this as the default enable/disable hotkey "
+                        "(pynput syntax, e.g. <ctrl>+<alt>+g); omit to just show the current config")
 
     args = ap.parse_args()
 
@@ -66,7 +84,9 @@ def main():
             idle=args.idle, cooldown=args.cooldown, smooth=args.smooth,
             clicks=not args.no_clicks, click_gesture=args.click_gesture,
             click_key=args.click_key,
-            dry_run=args.dry_run, verbose=args.verbose, overlay=args.overlay)
+            dry_run=args.dry_run, verbose=args.verbose, overlay=args.overlay,
+            systray=not args.no_systray,
+            hotkey=(args.hotkey if not args.no_hotkey else "none"))
     elif args.cmd == "preview":
         from .preview import preview
         preview(cameras=args.cameras)
@@ -98,3 +118,11 @@ def main():
             print(f"cam{cam}: {frames[cam]}/45 frames captured, face detected in {faces[cam]}")
         if not any(frames.values()):
             raise SystemExit("no camera produced frames — try other --cameras indices")
+    elif args.cmd == "config":
+        from .config import save_config
+        if args.hotkey:
+            cfg = save_config({"hotkey": args.hotkey})
+            print(f"hotkey set to {cfg['hotkey']!r} (persisted to {CONFIG_PATH})")
+        else:
+            print(f"hotkey: {cfg['hotkey']!r}")
+            print(f"(config file: {CONFIG_PATH})")
