@@ -4,10 +4,12 @@ someone else's shortcut.
 
 This only sees bindings registered through gsettings/dconf (desktop
 environment shortcuts, media keys, and anything else that stores its
-binding there) — not every possible global hotkey grabbed by other means
-(e.g. an app using its own X11 grab). An empty result is a helpful sign,
-not a guarantee of no clash. Never raises: any failure just means "no
-conflicts found".
+binding there), plus a best-effort check for XKB keyboard-layout
+group-toggle options (e.g. "grp:win_space_toggle") that intercept
+modifier+Space combos at the X server level — not every possible global
+hotkey grabbed by other means (e.g. an app using its own X11 grab). An
+empty result is a helpful sign, not a guarantee of no clash. Never raises:
+any failure just means "no conflicts found".
 """
 import ast
 import re
@@ -83,9 +85,55 @@ def _extract_accels(raw_value):
     return []
 
 
+# XKB "grp:*_toggle" options rebind keyboard-layout switching to a modifier
+# + key combo at the X server level, below window-manager shortcuts — a
+# combo consumed there never reaches apps as a normal key event. In
+# practice the option name (e.g. "win_space_toggle") doesn't reliably
+# describe what's actually live: XKB option changes can lag a running X
+# session, so the name and the enforced combo can disagree (observed on
+# this project: option said "win_space_toggle", but Shift+Space was what
+# actually got intercepted). Rather than trust the name, treat *any*
+# "grp:*_toggle" option as evidence that *some* modifier+Space combo is
+# being intercepted, and flag every modifier+Space combo as a possible
+# conflict — since Space is the key virtually all of these options bind.
+_SINGLE_MODIFIERS = {"<ctrl>", "<alt>", "<shift>", "<cmd>"}
+
+
+def _is_modifier_space_combo(combo):
+    parts = combo.split("+")
+    return len(parts) == 2 and parts[0] in _SINGLE_MODIFIERS and parts[1] == "<space>"
+
+
+def _xkb_conflicts(combo):
+    """Best-effort check for XKB layout group-toggle options (configured via
+    setxkbmap/gsettings input-sources) that shadow `combo` at the X server
+    level, beneath any window-manager shortcut."""
+    if not _is_modifier_space_combo(combo):
+        return []
+    try:
+        out = subprocess.run(["setxkbmap", "-query"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    options_line = next((l for l in out.splitlines()
+                          if l.startswith("options:")), "")
+    options = options_line.split(":", 1)[1].strip() if ":" in options_line else ""
+    conflicts = []
+    for opt in options.split(","):
+        opt = opt.strip()
+        if opt.startswith("grp:") and opt[len("grp:"):].endswith("_toggle"):
+            conflicts.append(
+                f"XKB keyboard layout switch option ({opt}) — a "
+                f"modifier+Space combo may be consumed by the X server "
+                f"before it reaches any app; verify this exact combo works "
+                f"before relying on it"
+            )
+    return conflicts
+
+
 def find_conflicts(combo):
-    """Return a list of human-readable 'schema key (accelerator)' strings
-    for desktop keybindings that already use `combo`."""
+    """Return a list of human-readable strings describing desktop keybindings
+    or XKB layout-switch options that already use `combo`."""
     conflicts = []
     try:
         for schema, key, raw_value in _iter_raw_bindings():
@@ -93,5 +141,6 @@ def find_conflicts(combo):
                 if accel and _accel_to_combo(accel) == combo:
                     conflicts.append(f"{schema} {key} ({accel})")
     except Exception:
-        return []  # best-effort: any unexpected failure -> no conflicts found
+        pass  # best-effort: any unexpected failure -> no conflicts found
+    conflicts.extend(_xkb_conflicts(combo))
     return conflicts
