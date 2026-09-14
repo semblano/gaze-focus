@@ -118,10 +118,19 @@ class _HotkeyCaptureDialog(QtWidgets.QDialog):
         cancel_btn = buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
         disable_btn.clicked.connect(self._disable)
         cancel_btn.clicked.connect(self.reject)
+        # buttons must not hold keyboard focus, or Space/Enter activate them
+        # instead of reaching our keyPressEvent (e.g. Shift+Space would just
+        # "click" Disable Hotkey)
+        disable_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        cancel_btn.setFocusPolicy(QtCore.Qt.NoFocus)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self._label)
         layout.addWidget(buttons)
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus(QtCore.Qt.OtherFocusReason)
 
     def _disable(self):
         self.combo = "none"
