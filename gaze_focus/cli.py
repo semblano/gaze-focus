@@ -73,6 +73,12 @@ def main():
                    help="persist this as the default enable/disable hotkey "
                         "(pynput syntax, e.g. <ctrl>+<alt>+g); omit to just show the current config")
 
+    s = sub.add_parser("service", help="manage the systemd --user service (start gaze-focus at login)")
+    s.add_argument("action", choices=["status", "enable", "disable"],
+                   help="status: show install/enable state; "
+                        "enable: install (if needed) + start at login now and on future logins; "
+                        "disable: stop starting at login (does not kill an already-running instance)")
+
     args = ap.parse_args()
 
     if args.cmd == "calibrate":
@@ -126,3 +132,18 @@ def main():
         else:
             print(f"hotkey: {cfg['hotkey']!r}")
             print(f"(config file: {CONFIG_PATH})")
+    elif args.cmd == "service":
+        from . import service
+        if args.action == "status":
+            st = service.status()
+            print(f"service: {st}")
+            if st != "unavailable":
+                print(f"(unit file: {service.UNIT_PATH})")
+                print(f"(extra args file: {service.ENV_FILE})")
+        else:
+            try:
+                service.set_enabled(args.action == "enable")
+            except RuntimeError as exc:
+                raise SystemExit(f"gaze-focus service {args.action} failed: {exc}")
+            print(f"service {args.action}d "
+                  f"(unit: {service.UNIT_PATH}; edit {service.ENV_FILE} for extra CLI flags)")

@@ -12,6 +12,7 @@ os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)  # cv2 poisons this on impor
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .sysbindings import find_conflicts
+from . import service as _service
 
 # (r, g, b) per status
 STATUS_COLORS = {
@@ -186,19 +187,25 @@ class GazeTray:
         self.act_hotkey = QtWidgets.QAction("Change Hotkey…", self.tray)
         self.act_hotkey.triggered.connect(self._on_change_hotkey)
         self.act_hotkey.setEnabled(self._on_hotkey_change is not None)
+        self.act_autostart = QtWidgets.QAction("Start on Login", self.tray)
+        self.act_autostart.setCheckable(True)
+        self.act_autostart.triggered.connect(self._on_toggle_autostart)
         self.act_quit = QtWidgets.QAction("Quit", self.tray)
         self.act_quit.triggered.connect(self._on_quit)
 
         menu = QtWidgets.QMenu()
         menu.addAction(self.act_toggle)
         menu.addAction(self.act_hotkey)
+        menu.addAction(self.act_autostart)
         menu.addSeparator()
         menu.addAction(self.act_quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_activated)
+        menu.aboutToShow.connect(self._sync_autostart_action)
 
         self._last = None
         self.refresh()
+        self._sync_autostart_action()
         self.tray.show()
 
     def _on_toggle(self):
@@ -230,6 +237,28 @@ class GazeTray:
         label = "disabled" if text == "none" else text
         self.tray.showMessage("gaze-focus", f"Hotkey {label}",
                               QtWidgets.QSystemTrayIcon.Information, 3000)
+
+    def _sync_autostart_action(self):
+        """Refresh the 'Start on Login' checkbox to match systemd's actual
+        state — cheap enough to call every time the menu opens, since it may
+        have been changed outside gaze-focus (e.g. `systemctl` directly)."""
+        st = _service.status()
+        if st == "unavailable":
+            self.act_autostart.setEnabled(False)
+            self.act_autostart.setChecked(False)
+            self.act_autostart.setText("Start on Login (unavailable)")
+        else:
+            self.act_autostart.setEnabled(True)
+            self.act_autostart.setText("Start on Login")
+            self.act_autostart.setChecked(st == "enabled")
+
+    def _on_toggle_autostart(self, checked):
+        try:
+            _service.set_enabled(checked)
+        except RuntimeError as exc:
+            QtWidgets.QMessageBox.warning(
+                None, "gaze-focus", f"Could not update the login service:\n{exc}")
+        self._sync_autostart_action()
 
     def _on_quit(self):
         self.on_quit()

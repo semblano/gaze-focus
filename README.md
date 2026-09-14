@@ -110,7 +110,48 @@ new one (half the error margin deep). Cameras capture at 1280x720 MJPG
 for iris precision; if double-blinks start getting missed (the loop runs
 ~15fps at 720p), drop the resolution in `features.py`.
 
-## Multiple cameras
+## Systray, hotkey, and autostart
+
+`run` shows a systray icon (color = status: blue *loaded*, green *enabled*,
+gray *disabled*) with a right-click menu:
+
+- **Enabled** — toggle gaze-focus on/off without quitting (left-click the
+  icon does the same).
+- **Change Hotkey…** — press a new key combination live (no need to know
+  pynput syntax); warns if it looks like it collides with an existing
+  desktop shortcut or a keyboard-layout-switch binding (see caveat below).
+- **Start on Login** — installs and enables a `systemd --user` service so
+  gaze-focus starts automatically at login and restarts itself if it
+  crashes; unchecking stops that (does not kill an already-running
+  instance started this way — use Quit or `systemctl --user stop
+  gaze-focus`).
+
+The enable/disable hotkey defaults to `<ctrl>+<alt>+g`; persist a different
+default with `gaze-focus config --hotkey <keys>` (pynput syntax, e.g.
+`<ctrl>+<alt>+g`; `none` disables it). `run --hotkey ...` / `--no-hotkey` /
+`--no-systray` override for a single run.
+
+You can also manage the login service from the CLI:
+
+```sh
+gaze-focus service status    # installed? enabled? running?
+gaze-focus service enable    # start now + on every login
+gaze-focus service disable   # stop starting at login
+```
+
+The service runs whatever `gaze-focus run` flags you set in
+`~/.config/gaze-focus/service.env` (`GAZE_FOCUS_ARGS=--cameras 4
+--no-clicks`, for example) — edit that file and `systemctl --user restart
+gaze-focus` to apply changes. Logs: `journalctl --user -u gaze-focus -f`.
+
+**Caveat:** some keyboards/desktops bind a modifier+Space combo (e.g.
+Shift+Space) to switch keyboard layout at the X server level, below any
+app or window manager — such a combo silently never reaches gaze-focus as
+a hotkey even though the capture dialog accepts it. The dialog does its
+best to warn about this, but treat any modifier+Space combo with
+suspicion and prefer something else (the default is fine).
+
+
 
 If you have a camera per monitor (e.g. laptop cam + a monitor's built-in
 camera), pass all of them to every command: `--cameras 0,4`. Calibration
